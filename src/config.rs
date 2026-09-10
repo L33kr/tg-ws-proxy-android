@@ -81,6 +81,9 @@ pub static CFPROXY: Lazy<RwLock<CfproxyConfig>> = Lazy::new(|| {
 pub static CFPROXY_429: Lazy<RwLock<HashMap<String, Cfproxy429State>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
+pub static CFWORKER_DOMAINS: Lazy<RwLock<Vec<String>>> =
+    Lazy::new(|| RwLock::new(Vec::new()));
+
 pub const CFPROXY_DOMAINS_URL: &str =
     "https://raw.githubusercontent.com/Flowseal/tg-ws-proxy/main/.github/cfproxy-domains.txt";
 
