@@ -7,9 +7,9 @@ use byteorder::{ByteOrder, LittleEndian};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
@@ -95,11 +95,15 @@ pub struct PoolEntry {
 struct SlotState {
     queue: Mutex<std::collections::VecDeque<PoolEntry>>,
     refilling: AtomicI32,
+    rotating: AtomicI32,
+    refill_failures: AtomicU32,
+    refill_after: Mutex<Option<Instant>>,
 }
 
 pub struct WsPool {
     slots: Mutex<HashMap<DcSlot, Arc<SlotState>>>,
     cancel_token: CancellationToken,
+    try_fronting_first: AtomicBool,
 }
 
 impl WsPool {
@@ -107,6 +111,9 @@ impl WsPool {
         WsPool {
             slots: Mutex::new(HashMap::new()),
             cancel_token,
+            // Upstream starts with fronting-first because it is more reliable
+            // on networks that reset the direct Telegram websocket handshake.
+            try_fronting_first: AtomicBool::new(true),
         }
     }
 
@@ -117,6 +124,9 @@ impl WsPool {
                 Arc::new(SlotState {
                     queue: Mutex::new(std::collections::VecDeque::with_capacity(16)),
                     refilling: AtomicI32::new(0),
+                    rotating: AtomicI32::new(0),
+                    refill_failures: AtomicU32::new(0),
+                    refill_after: Mutex::new(None),
                 })
             })
             .clone()
@@ -145,14 +155,17 @@ impl WsPool {
                         if is_pool_entry_usable(&entry, now) {
                             ws = Some(entry.ws);
                             STATS.pool_hits.fetch_add(1, Ordering::Relaxed);
+                            ldebug!(
+                                " WS pool hit DC{}{} (left={})",
+                                dc,
+                                media_tag(is_media),
+                                q.len()
+                            );
                             break;
-                        } else {
-                            let e = entry;
-                            tokio::spawn(async move {
-                                e.ws.close().await;
-                            });
-                            continue;
                         }
+                        tokio::spawn(async move {
+                            entry.ws.close().await;
+                        });
                     }
                     None => {
                         STATS.pool_misses.fetch_add(1, Ordering::Relaxed);
@@ -162,19 +175,42 @@ impl WsPool {
             }
         }
 
+        if ws.is_some() {
+            self.report_success(&state).await;
+        }
+        self.schedule_refill(state, target_ip, domains).await;
+        ws
+    }
+
+    async fn schedule_refill(
+        self: &Arc<Self>,
+        state: Arc<SlotState>,
+        target_ip: String,
+        domains: Vec<String>,
+    ) {
+        if let Some(until) = *state.refill_after.lock().await {
+            if Instant::now() < until {
+                return;
+            }
+        }
+
         if state
             .refilling
             .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
+            .is_err()
         {
-            let pool = self.clone();
-            let st = state.clone();
-            tokio::spawn(async move {
-                pool.refill(st, target_ip, domains).await;
-            });
+            return;
         }
 
-        ws
+        let pool = self.clone();
+        tokio::spawn(async move {
+            pool.refill(state, target_ip, domains).await;
+        });
+    }
+
+    async fn report_success(&self, state: &Arc<SlotState>) {
+        state.refill_failures.store(0, Ordering::Relaxed);
+        *state.refill_after.lock().await = None;
     }
 
     async fn refill(
@@ -184,35 +220,37 @@ impl WsPool {
         domains: Vec<String>,
     ) {
         let cur_len = state.queue.lock().await.len();
-        let needed = POOL_SIZE.load(Ordering::Relaxed) as usize;
-        let needed = needed.saturating_sub(cur_len);
+        let target_size = POOL_SIZE.load(Ordering::Relaxed).clamp(2, 16) as usize;
+        let needed = target_size.saturating_sub(cur_len);
         if needed == 0 {
             state.refilling.store(0, Ordering::SeqCst);
             return;
         }
 
-        let mut handles = Vec::new();
+        let mut handles = Vec::with_capacity(needed);
         for _ in 0..needed {
+            let pool = self.clone();
             let target_ip = target_ip.clone();
             let domains = domains.clone();
             let cancel = self.cancel_token.clone();
             handles.push(tokio::spawn(async move {
                 tokio::select! {
                     _ = cancel.cancelled() => None,
-                    r = connect_one_ws(&target_ip, &domains) => r,
+                    r = pool.connect_one(&target_ip, &domains) => r,
                 }
             }));
         }
 
+        let mut connected = 0usize;
         for h in handles {
             if let Ok(Some(ws)) = h.await {
                 let now = now_unix();
                 let mut q = state.queue.lock().await;
-                if q.len() < 16 {
+                if q.len() < target_size {
                     q.push_back(PoolEntry { ws, created: now });
+                    connected += 1;
                 } else {
                     drop(q);
-                    let ws = ws;
                     tokio::spawn(async move {
                         ws.close().await;
                     });
@@ -220,7 +258,144 @@ impl WsPool {
             }
         }
 
+        if connected > 0 {
+            self.report_success(&state).await;
+            self.schedule_rotation(state.clone(), target_ip.clone(), domains.clone());
+        } else {
+            let failures = state.refill_failures.fetch_add(1, Ordering::Relaxed) + 1;
+            let exp = failures.saturating_sub(1).min(12);
+            let delay_secs = (WS_POOL_REFILL_BACKOFF_INITIAL_SECS.saturating_mul(1u64 << exp))
+                .min(WS_POOL_REFILL_BACKOFF_MAX_SECS);
+            *state.refill_after.lock().await =
+                Some(Instant::now() + Duration::from_secs(delay_secs));
+            linfo!(
+                " WS pool refill failed, retry in {}s",
+                delay_secs
+            );
+        }
+
+        ldebug!(
+            " WS pool refilled: {} ready",
+            state.queue.lock().await.len()
+        );
         state.refilling.store(0, Ordering::SeqCst);
+    }
+
+    fn schedule_rotation(
+        self: &Arc<Self>,
+        state: Arc<SlotState>,
+        target_ip: String,
+        domains: Vec<String>,
+    ) {
+        if state
+            .rotating
+            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+
+        let pool = self.clone();
+        tokio::spawn(async move {
+            pool.rotate(state, target_ip, domains).await;
+        });
+    }
+
+    async fn rotate(
+        self: Arc<Self>,
+        state: Arc<SlotState>,
+        target_ip: String,
+        domains: Vec<String>,
+    ) {
+        loop {
+            tokio::select! {
+                _ = self.cancel_token.cancelled() => break,
+                _ = tokio::time::sleep(WS_POOL_CHECK_INTERVAL) => {}
+            }
+
+            let now = now_unix();
+            let mut expired = Vec::new();
+            let ready_count;
+            {
+                let mut q = state.queue.lock().await;
+                let mut ready = std::collections::VecDeque::with_capacity(q.len());
+                while let Some(entry) = q.pop_front() {
+                    if is_pool_entry_usable(&entry, now) {
+                        ready.push_back(entry);
+                    } else {
+                        expired.push(entry.ws);
+                    }
+                }
+                *q = ready;
+                ready_count = q.len();
+            }
+
+            for ws in expired {
+                tokio::spawn(async move {
+                    ws.close().await;
+                });
+            }
+
+            if ready_count < POOL_SIZE.load(Ordering::Relaxed).clamp(2, 16) as usize {
+                self.schedule_refill(
+                    state.clone(),
+                    target_ip.clone(),
+                    domains.clone(),
+                ).await;
+            }
+        }
+        state.rotating.store(0, Ordering::SeqCst);
+    }
+
+    async fn connect_one(&self, target_ip: &str, domains: &[String]) -> Option<RawWebSocket> {
+        for domain in domains {
+            if self.try_fronting_first.load(Ordering::Relaxed) {
+                if let Some(ws) = self.connect_fronted(target_ip, domain).await {
+                    return Some(ws);
+                }
+            }
+
+            match ws_connect(target_ip, domain, "/apiws", WS_POOL_CONNECT_TIMEOUT).await {
+                Ok(ws) => {
+                    self.try_fronting_first.store(false, Ordering::Relaxed);
+                    return Some(ws);
+                }
+                Err(WsError::Timeout) => {
+                    if self.try_fronting_first.load(Ordering::Relaxed) {
+                        return None;
+                    }
+                    return self.connect_fronted(target_ip, domain).await;
+                }
+                Err(WsError::Io(e)) if e.kind() == std::io::ErrorKind::ConnectionReset => {
+                    if self.try_fronting_first.load(Ordering::Relaxed) {
+                        return None;
+                    }
+                    return self.connect_fronted(target_ip, domain).await;
+                }
+                Err(WsError::Handshake(h)) if h.is_redirect() => continue,
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
+    async fn connect_fronted(&self, target_ip: &str, domain: &str) -> Option<RawWebSocket> {
+        match ws_connect_with_sni(
+            target_ip,
+            domain,
+            "/apiws",
+            WS_POOL_FRONTED_TIMEOUT,
+            WS_FRONTING_SNI,
+        )
+        .await
+        {
+            Ok(ws) => {
+                STATS.connections_fronting.fetch_add(1, Ordering::Relaxed);
+                self.try_fronting_first.store(true, Ordering::Relaxed);
+                Some(ws)
+            }
+            Err(_) => None,
+        }
     }
 
     pub async fn warmup(self: &Arc<Self>, dc_opt_map: &HashMap<i32, String>) {
@@ -235,27 +410,23 @@ impl WsPool {
                     is_media: is_media_int(is_media),
                 };
                 let state = self.get_slot(slot).await;
-                if state
-                    .refilling
-                    .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
-                {
-                    let pool = self.clone();
-                    let st = state.clone();
-                    let ip = target_ip.clone();
-                    let doms = domains.clone();
-                    tokio::spawn(async move {
-                        pool.refill(st, ip, doms).await;
-                    });
-                }
+                self.schedule_refill(
+                    state,
+                    target_ip.clone(),
+                    domains,
+                ).await;
             }
         }
+        linfo!(" WS pool warmup started for {} DC(s)", dc_opt_map.len());
     }
 
     pub async fn idle_count(&self) -> usize {
         let map = self.slots.lock().await;
+        let states: Vec<Arc<SlotState>> = map.values().cloned().collect();
+        drop(map);
+
         let mut count = 0;
-        for s in map.values() {
+        for s in states {
             count += s.queue.lock().await.len();
         }
         count
@@ -263,7 +434,10 @@ impl WsPool {
 
     pub async fn close_all(&self) {
         let map = self.slots.lock().await;
-        for s in map.values() {
+        let states: Vec<Arc<SlotState>> = map.values().cloned().collect();
+        drop(map);
+
+        for s in states {
             let mut q = s.queue.lock().await;
             for e in q.drain(..) {
                 tokio::spawn(async move {
