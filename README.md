@@ -1,57 +1,75 @@
-# TG WS Proxy Android
+# TG WS Proxy for Android
 
-Это Android-форк оригинального проекта [Flowseal/tg-ws-proxy](https://github.com/Flowseal/tg-ws-proxy) — локального MTProto-прокси для Telegram, который использует WebSocket/WSS-транспорт и Cloudflare fallback.
+Android порт [Flowseal/tg-ws-proxy](https://github.com/Flowseal/tg-ws-proxy) с графическим интерфейсом и нативным Rust-ядром.
+
+## О приложении
+
+TG WS Proxy Android запускает локальный MTProto-прокси на Android и перенаправляет трафик Telegram через WebSocket/WSS. Это позволяет использовать тот же подход, что и оригинальный TG WS Proxy, непосредственно на телефоне.
+
+Приложение состоит из двух частей:
+
+- Android UI на Kotlin / Jetpack Compose / Material 3;
+- нативное прокси-ядро на Rust, подключённое через JNA.
 
 ## Возможности
 
-- Android UI на Kotlin + Jetpack Compose + Material 3
-- Нативное прокси-ядро на Rust
-- Foreground Service для стабильной фоновой работы
-- Просмотр логов прямо в приложении
-- Динамические темы Material You
-- Автозапуск и быстрый доступ через системную плитку
-- Обновление приложения через GitHub Releases
-- Cloudflare fallback / custom CF domain
-- Настройка локального адреса и порта
-- Поддержка ARM64, ARM32 и universal APK
+- локальный MTProto-прокси;
+- WebSocket/WSS транспорт;
+- Cloudflare proxy fallback;
+- пользовательский Cloudflare-домен;
+- поддержка ARM64 и ARM32;
+- Foreground Service;
+- просмотр логов;
+- статистика работы прокси;
+- запуск после загрузки устройства;
+- Quick Settings tile;
+- Material You / динамические цвета;
+- встроенная проверка обновлений через GitHub Releases.
 
-## Как это работает
+## Архитектура
 
 ```text
 Telegram Android
-    ↓
-локальный MTProto proxy (127.0.0.1:1443)
-    ↓
-TG WS Proxy
-    ↓
-WSS / Cloudflare или прямое соединение
-    ↓
+        ↓
+MTProto proxy 127.0.0.1:1443
+        ↓
+TG WS Proxy Android
+        ↓
+WebSocket / WSS
+        ↓
 Telegram DC
 ```
 
+При проблемах прямого WebSocket-соединения приложение может использовать Cloudflare fallback.
+
 ## Установка
 
-Скачайте APK из раздела Releases и установите его на Android.
+Готовые APK доступны в разделе Releases.
 
-Для большинства современных устройств подходит ARM64-сборка.
-
-## Использование
-
-1. Запустите приложение.
-2. Нажмите запуск прокси.
-3. Настройте Telegram на локальный MTProto-прокси `127.0.0.1:1443`.
-4. При необходимости настройте Cloudflare fallback в параметрах приложения.
+Для большинства современных телефонов используется ARM64-сборка (`arm64-v8a`). Для старых устройств доступна ARM32 (`armeabi-v7a`).
 
 ## Сборка
 
-Для Android-части используется Gradle, а нативное ядро собирается Rust/cargo-ndk.
+### Rust
 
-Смотрите `build_apk.bat` и `build_so.bat` для локальной сборки на Windows.
+Для сборки нативной библиотеки нужен Rust и Android NDK.
 
-## Происхождение проекта
+На Windows можно использовать:
 
-Проект является Android-портом/форком [Flowseal/tg-ws-proxy](https://github.com/Flowseal/tg-ws-proxy).
+```bat
+build_so.bat
+```
+
+### Android APK
+
+```bat
+build_apk.bat
+```
+
+Также проект можно открыть в Android Studio и собрать стандартными Gradle-задачами.
 
 ## Лицензия
 
-GPL-3.0.
+Проект распространяется под GPL-3.0.
+
+Оригинальный проект: [Flowseal/tg-ws-proxy](https://github.com/Flowseal/tg-ws-proxy)
