@@ -1,52 +1,45 @@
 # TG WS Proxy Android
 
-Android-версия [TG WS Proxy](https://github.com/Flowseal/tg-ws-proxy) с интерфейсом на Jetpack Compose и нативным прокси-ядром на Rust.
+Android-форк оригинального проекта [Flowseal/tg-ws-proxy](https://github.com/Flowseal/tg-ws-proxy) — локального MTProto-прокси для Telegram с WebSocket/WSS-транспортом и Cloudflare fallback.
 
 ## Возможности
 
-- Локальный MTProto proxy для Telegram
-- WebSocket/WSS транспорт
-- Cloudflare proxy fallback
-- Работа в фоне через Foreground Service
-- Просмотр логов в приложении
-- Статистика соединений и трафика
-- Настройка адреса, порта и пула соединений
-- Поддержка пользовательского Cloudflare-домена
-- Автозапуск после загрузки Android
+- Android UI на Kotlin / Jetpack Compose / Material 3
+- Нативное прокси-ядро на Rust
+- Foreground Service для фоновой работы
+- Логи и статистика работы прокси
+- Material You / динамические темы
+- Автозапуск после загрузки
 - Quick Settings tile
-- Material 3 / Material You
-- Автоматическая проверка обновлений
-- Поддержка ARM64 и ARM32
+- Проверка обновлений через GitHub Releases
+- Cloudflare fallback и пользовательский CF-домен
+- ARM64 / ARM32 / Universal сборки
 
-## Как работает
+## Принцип работы
 
 ```text
 Telegram Android
-        ↓
-Local MTProto Proxy (127.0.0.1:1443)
-        ↓
+    ↓
+MTProto proxy 127.0.0.1:1443
+    ↓
 TG WS Proxy Android
-        ↓
-WebSocket / WSS
-        ↓
+    ↓
+WSS / Cloudflare / Direct
+    ↓
 Telegram DC
 ```
 
-При невозможности подключиться напрямую приложение может использовать Cloudflare fallback.
-
 ## Установка
 
-APK можно скачать из раздела Releases.
+Скачайте APK из раздела Releases и установите его на Android.
 
-Для большинства современных Android-устройств используйте ARM64-сборку.
+Для большинства современных устройств подходит ARM64-сборка.
 
 ## Сборка
 
-Проект содержит Android-приложение и Rust-библиотеку.
+Для Android используется Gradle, для нативной части — Rust + Android NDK / cargo-ndk.
 
-Для сборки Rust-части используется Android NDK и `cargo-ndk`.
-
-На Windows также доступны:
+На Windows доступны скрипты:
 
 ```bat
 build_so.bat
@@ -57,4 +50,4 @@ build_apk.bat
 
 GPL-3.0.
 
-Основано на [Flowseal/tg-ws-proxy](https://github.com/Flowseal/tg-ws-proxy).
+Оригинальный проект: [Flowseal/tg-ws-proxy](https://github.com/Flowseal/tg-ws-proxy)
