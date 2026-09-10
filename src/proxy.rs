@@ -896,6 +896,46 @@ async fn cfproxy_acquire_ws(
     }
 }
 
+async fn cfworker_acquire_ws(
+    dc: i32,
+    fallback_dst: &str,
+    cancel_token: &CancellationToken,
+) -> Option<(RawWebSocket, String)> {
+    if fallback_dst.is_empty() {
+        return None;
+    }
+    let domains = CFWORKER_DOMAINS.read().clone();
+    if domains.is_empty() {
+        return None;
+    }
+
+    let path = format!("/apiws?dst={}&dc={}", fallback_dst, dc);
+    for worker_domain in domains {
+        ldebug!(
+            " CF worker try {} for DC{} -> {}",
+            worker_domain,
+            dc,
+            fallback_dst
+        );
+        let attempt = tokio::select! {
+            _ = cancel_token.cancelled() => return None,
+            r = ws_connect(&worker_domain, &worker_domain, &path, 10.0) => r,
+        };
+        match attempt {
+            Ok(ws) => return Some((ws, worker_domain)),
+            Err(e) => {
+                lwarn!(
+                    " CF worker {} failed for DC{}: {}",
+                    worker_domain,
+                    dc,
+                    e.compact()
+                );
+            }
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // doFallback — теперь CF не "съедает" conn при провале; при неуспехе CF
 // тот же conn уходит в TCP fallback (1-в-1 как Go doFallback).
@@ -922,6 +962,41 @@ pub async fn do_fallback(
 
     let fallback_dst = resolve_fallback_target(dc, is_media);
     let use_cf = CFPROXY_ENABLED.load(Ordering::Relaxed);
+    let use_worker = !CFWORKER_DOMAINS.read().is_empty();
+
+    if use_worker && !fallback_dst.is_empty() {
+        if let Some((ws, worker_domain)) =
+            cfworker_acquire_ws(dc, &fallback_dst, &cancel_token).await
+        {
+            if ws.send(relay_init).await.is_ok() {
+                STATS.connections_cfworker.fetch_add(1, Ordering::Relaxed);
+                linfo!(
+                    " DC{}{} подключен через CF Worker {}",
+                    dc,
+                    media_tag(is_media),
+                    worker_domain
+                );
+                bridge_ws(
+                    conn,
+                    ws,
+                    label,
+                    dc,
+                    worker_domain,
+                    443,
+                    is_media,
+                    None,
+                    clt_dec,
+                    clt_enc,
+                    tg_enc,
+                    tg_dec,
+                    cancel_token,
+                )
+                .await;
+                return true;
+            }
+            ws.close().await;
+        }
+    }
 
     if use_cf {
         // Сначала добываем WS через CF, conn не трогаем.
