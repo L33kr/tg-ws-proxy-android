@@ -76,3 +76,51 @@ jobs:
           name: tg-ws-proxy-android-debug
           path: artifacts/*.apk
           if-no-files-found: error
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tg-ws-proxy-android-debug
+          path: release-apks
+
+      - name: Create v1.3.0 pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > release-notes.md <<'EOF'
+          ## tg-ws-proxy-android v1.3.0
+
+          Обновление Android-форка с переносом актуальной сетевой логики Flowseal на сентябрь 2026.
+
+          ### Что изменилось
+          - обновлён WS pool: автоматическое дозаполнение и ротация старых соединений;
+          - exponential backoff при ошибках refill;
+          - добавлен fronting-first и fallback на domain fronting при timeout/reset;
+          - прямой WS timeout и cooldown проблемных IP синхронизированы с актуальным upstream;
+          - обновлён список Cloudflare proxy доменов;
+          - добавлена поддержка Cloudflare Worker как первого fallback перед CF CDN и TCP;
+          - Worker-домены можно указать прямо в настройках Android;
+          - исправлена сборка Android и добавлен воспроизводимый GitHub Actions CI;
+          - сборки доступны для ARM64, ARM32 и Universal.
+
+          ### Важно
+          Основная работа прокси была проверена на реальном Android-устройстве и работает стабильно.
+          **Cloudflare Worker пока считается экспериментальной функцией: его код собирается и интеграция включена, но реальная работа Worker ещё не была проверена.**
+
+          Это pre-release. APK подписаны debug-ключом CI и предназначены для тестирования этой версии форка.
+          EOF
+
+          gh release create v1.3.0 release-apks/*.apk \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "tg-ws-proxy-android v1.3.0" \
+            --notes-file release-notes.md \
+            --prerelease
