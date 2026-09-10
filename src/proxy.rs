@@ -1146,7 +1146,7 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
             label,
             dc,
             is_media,
-            splitter,
+            MsgSplitter::new(&relay_init, proto),
             &clt_decryptor,
             &clt_encryptor,
             &tg_encryptor,
@@ -1157,23 +1157,74 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
         return;
     }
 
+    let domains = ws_domains(dc, is_media);
+    let ip_fail_until = IP_FAIL_UNTIL.read().get(&target).copied().unwrap_or(0.0);
+    let mut prepooled_ws: Option<RawWebSocket> = None;
+
+    // Mirror current Flowseal behavior: a timed-out direct IP is avoided for a
+    // long cooldown, but an already established WS from the pool is still usable.
+    if now < ip_fail_until && CFPROXY_ENABLED.load(Ordering::Relaxed) {
+        prepooled_ws = pool
+            .get(dc, is_media, target.clone(), domains.clone())
+            .await;
+        if prepooled_ws.is_none() {
+            linfo!(
+                " DC{}{} direct target {} is cooling down -> fallback",
+                dc,
+                m_tag,
+                target
+            );
+            do_fallback(
+                conn,
+                &relay_init,
+                label,
+                dc,
+                is_media,
+                MsgSplitter::new(&relay_init, proto),
+                &clt_decryptor,
+                &clt_encryptor,
+                &tg_encryptor,
+                &tg_decryptor,
+                cancel_token,
+            )
+            .await;
+            return;
+        }
+    }
+
     let fail_until = DC_FAIL_UNTIL.read().get(&dc_key).copied().unwrap_or(0.0);
     let ws_timeout = if now < fail_until {
         WS_FAIL_TIMEOUT
     } else {
-        10.0
+        5.0
     };
 
-    let domains = ws_domains(dc, is_media);
-    let (mut ws_opt, ws_failed_redirect, all_redirects) =
-        if let Some(w) = pool.get(dc, is_media, target.clone(), domains.clone()).await {
-            (Some(w), false, false)
+    let (mut ws_opt, ws_failed_redirect, all_redirects, ws_timed_out) =
+        if let Some(w) = prepooled_ws {
+            (Some(w), false, false, false)
+        } else if let Some(w) = pool
+            .get(dc, is_media, target.clone(), domains.clone())
+            .await
+        {
+            (Some(w), false, false, false)
         } else {
             connect_direct_ws(&target, &domains, ws_timeout).await
         };
 
     if ws_opt.is_none() {
         lwarn!(" DC{}{}: все попытки WS провалены (DPI/Интернет)", dc, m_tag);
+        if ws_timed_out {
+            IP_FAIL_UNTIL
+                .write()
+                .insert(target.clone(), now + IP_FAIL_COOLDOWN);
+            linfo!(
+                " DC{}{} direct target {} timed out, cooldown for {}s",
+                dc,
+                m_tag,
+                target,
+                IP_FAIL_COOLDOWN as i64
+            );
+        }
         if ws_failed_redirect && all_redirects {
             WS_BLACKLIST.write().insert(dc_key, true);
             lwarn!(" DC{}{} заблокирован (302)", dc, m_tag);
@@ -1210,8 +1261,13 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
         DC_FAIL_UNTIL.write().insert(dc_key, now + DC_FAIL_COOLDOWN);
 
         lwarn!(" direct retry fresh ws DC{}{}", dc, m_tag);
-        let (retry_ws, retry_failed_redirect, retry_all_redirects) =
+        let (retry_ws, retry_failed_redirect, retry_all_redirects, retry_timed_out) =
             connect_direct_ws(&target, &domains, ws_timeout).await;
+        if retry_timed_out {
+            IP_FAIL_UNTIL
+                .write()
+                .insert(target.clone(), now + IP_FAIL_COOLDOWN);
+        }
         match retry_ws {
             None => {
                 if retry_failed_redirect && retry_all_redirects {
@@ -1265,7 +1321,7 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
     }
     let _ = send_ok;
 
-    DC_FAIL_UNTIL.write().remove(&dc_key);
+    IP_FAIL_UNTIL.write().remove(&target);
     let _ = &pool;
     STATS.connections_ws.fetch_add(1, Ordering::Relaxed);
 
@@ -1292,16 +1348,23 @@ pub async fn connect_direct_ws(
     target: &str,
     domains: &[String],
     timeout: f64,
-) -> (Option<RawWebSocket>, bool, bool) {
+) -> (Option<RawWebSocket>, bool, bool, bool) {
     if domains.is_empty() {
-        return (None, false, false);
+        return (None, false, false, false);
     }
     let mut ws_failed_redirect = false;
     let mut all_redirects = true;
+    let mut ws_timed_out = false;
 
     for dom in domains {
         match ws_connect(target, dom, "/apiws", timeout).await {
-            Ok(ws) => return (Some(ws), ws_failed_redirect, false),
+            Ok(ws) => return (Some(ws), ws_failed_redirect, false, ws_timed_out),
+            Err(WsError::Timeout) => {
+                STATS.ws_errors.fetch_add(1, Ordering::Relaxed);
+                all_redirects = false;
+                ws_timed_out = true;
+                break;
+            }
             Err(e) => {
                 STATS.ws_errors.fetch_add(1, Ordering::Relaxed);
                 if let Some(h) = e.handshake() {
@@ -1316,7 +1379,7 @@ pub async fn connect_direct_ws(
             }
         }
     }
-    (None, ws_failed_redirect, all_redirects)
+    (None, ws_failed_redirect, all_redirects, ws_timed_out)
 }
 
 // ---------------------------------------------------------------------------
