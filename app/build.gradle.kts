@@ -12,7 +12,7 @@ android {
     defaultConfig {
         applicationId = "com.amurcanov.tgwsproxy"
         targetSdk = 35
-        versionCode = 130
+        versionCode = 131
         versionName = "1.3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -142,7 +142,6 @@ dependencies {
 
     // JNA for easy C-shared library calls
     implementation("net.java.dev.jna:jna:5.14.0@aar")
-    debugImplementation("com.squareup.leakcanary:leakcanary-android:2.14")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.appcompat:appcompat:1.6.1")
 }
