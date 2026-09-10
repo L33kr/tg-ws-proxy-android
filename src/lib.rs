@@ -171,6 +171,7 @@ pub extern "C" fn StopProxy() -> c_int {
     STATS.reset();
     WS_BLACKLIST.write().clear();
     DC_FAIL_UNTIL.write().clear();
+    IP_FAIL_UNTIL.write().clear();
     cfproxy::clear_cfproxy_429_cooldowns();
 
     linfo!("StopProxy: exit");
@@ -213,6 +214,34 @@ pub unsafe extern "C" fn SetCfProxyConfig(
         cfg.domains = vec![user_domain.clone()];
         cfg.active = user_domain;
     }
+}
+
+/// # Safety
+/// `c_domains` — валидная C-строка или null. Домены разделяются запятыми,
+/// точками с запятой или пробелами.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn SetCfWorkerDomains(c_domains: *const c_char) {
+    let raw = cstr_to_string(c_domains);
+    let mut seen = std::collections::HashSet::new();
+    let mut domains = Vec::new();
+    for item in raw
+        .split(|ch: char| ch == ',' || ch == ';' || ch.is_whitespace())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let host = item
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .to_ascii_lowercase();
+        if host.is_empty() || host.contains('/') || !host.contains('.') {
+            continue;
+        }
+        if seen.insert(host.clone()) {
+            domains.push(host);
+        }
+    }
+    *CFWORKER_DOMAINS.write() = domains;
 }
 
 /// # Safety

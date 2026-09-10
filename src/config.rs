@@ -14,7 +14,8 @@ pub const DEFAULT_RECV_BUF: usize = 256 * 1024;
 pub const DEFAULT_SEND_BUF: usize = 256 * 1024;
 pub const DEFAULT_POOL_SZ: i32 = 4;
 
-pub const DC_FAIL_COOLDOWN: f64 = 30.0;
+pub const IP_FAIL_COOLDOWN: f64 = 3600.0;
+pub const DC_FAIL_COOLDOWN: f64 = 60.0;
 pub const WS_FAIL_TIMEOUT: f64 = 2.0;
 
 pub const BRIDGE_READ_TIMEOUT: Duration = Duration::from_secs(120);
@@ -25,7 +26,12 @@ pub const WS_BRIDGE_CHUNK_SIZE: usize = 64 * 1024;
 pub const POOLED_FRAME_CAP: usize = WS_BRIDGE_CHUNK_SIZE + 32;
 
 pub const WS_POOL_REUSE_MAX_AGE: f64 = 120.0;
+pub const WS_POOL_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 pub const WS_POOL_CONNECT_TIMEOUT: f64 = 8.0;
+pub const WS_POOL_FRONTED_TIMEOUT: f64 = 7.0;
+pub const WS_POOL_REFILL_BACKOFF_INITIAL_SECS: u64 = 1;
+pub const WS_POOL_REFILL_BACKOFF_MAX_SECS: u64 = 3600;
+pub const WS_FRONTING_SNI: &str = "sprinthost.ru";
 
 pub const CFPROXY_CACHE_FILE_NAME: &str = "cfproxy-domains-cache.txt";
 pub const CFPROXY_ACTIVE_FILE_NAME: &str = "cfproxy-active-domain.txt";
@@ -75,6 +81,9 @@ pub static CFPROXY: Lazy<RwLock<CfproxyConfig>> = Lazy::new(|| {
 pub static CFPROXY_429: Lazy<RwLock<HashMap<String, Cfproxy429State>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
+pub static CFWORKER_DOMAINS: Lazy<RwLock<Vec<String>>> =
+    Lazy::new(|| RwLock::new(Vec::new()));
+
 pub const CFPROXY_DOMAINS_URL: &str =
     "https://raw.githubusercontent.com/Flowseal/tg-ws-proxy/main/.github/cfproxy-domains.txt";
 
@@ -98,6 +107,11 @@ pub static CFPROXY_ENC: &[&str] = &[
     "ulihssf.com",
     "tmhqsdqmfpmk.com",
     "xwuwoqbm.com",
+    "orgcnunpj.com",
+    "zhkuldz.com",
+    "zypoljnslxa.com",
+    "efabnxaowuzs.com",
+    "zaftuzsftqdq.com",
 ];
 
 // DC default IPs
@@ -129,6 +143,8 @@ pub static WS_BLACKLIST: Lazy<RwLock<HashMap<(i32, i32), bool>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 pub static DC_FAIL_UNTIL: Lazy<RwLock<HashMap<(i32, i32), f64>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
+pub static IP_FAIL_UNTIL: Lazy<RwLock<HashMap<String, f64>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
 
 pub static ZERO64: [u8; 64] = [0u8; 64];
 
@@ -143,6 +159,8 @@ pub struct Stats {
     pub connections_ws: AtomicI64,
     pub connections_tcp_fallback: AtomicI64,
     pub connections_cfproxy: AtomicI64,
+    pub connections_fronting: AtomicI64,
+    pub connections_cfworker: AtomicI64,
     pub connections_http_reject: AtomicI64,
     pub connections_passthrough: AtomicI64,
     pub connections_bad: AtomicI64,
@@ -160,12 +178,14 @@ impl Stats {
         let ph = self.pool_hits.load(Ordering::Relaxed);
         let pm = self.pool_misses.load(Ordering::Relaxed);
         format!(
-            "total={} active={} ws={} tcp_fb={} cf={} bad={} err={} pool={}/{} up={} down={}",
+            "total={} active={} ws={} tcp_fb={} cf={} front={} worker={} bad={} err={} pool={}/{} up={} down={}",
             self.connections_total.load(Ordering::Relaxed),
             self.connections_active.load(Ordering::Relaxed),
             self.connections_ws.load(Ordering::Relaxed),
             self.connections_tcp_fallback.load(Ordering::Relaxed),
             self.connections_cfproxy.load(Ordering::Relaxed),
+            self.connections_fronting.load(Ordering::Relaxed),
+            self.connections_cfworker.load(Ordering::Relaxed),
             self.connections_bad.load(Ordering::Relaxed),
             self.ws_errors.load(Ordering::Relaxed),
             ph,
@@ -207,6 +227,8 @@ impl Stats {
         self.connections_ws.store(0, Ordering::Relaxed);
         self.connections_tcp_fallback.store(0, Ordering::Relaxed);
         self.connections_cfproxy.store(0, Ordering::Relaxed);
+        self.connections_fronting.store(0, Ordering::Relaxed);
+        self.connections_cfworker.store(0, Ordering::Relaxed);
         self.connections_http_reject.store(0, Ordering::Relaxed);
         self.connections_passthrough.store(0, Ordering::Relaxed);
         self.connections_bad.store(0, Ordering::Relaxed);
