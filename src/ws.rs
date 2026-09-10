@@ -527,6 +527,16 @@ pub async fn ws_connect_once(
     path: &str,
     timeout: Duration,
 ) -> Result<RawWebSocket, WsError> {
+    ws_connect_once_with_sni(dial_addr, domain, path, timeout, domain).await
+}
+
+pub async fn ws_connect_once_with_sni(
+    dial_addr: &str,
+    domain: &str,
+    path: &str,
+    timeout: Duration,
+    sni_domain: &str,
+) -> Result<RawWebSocket, WsError> {
     if dial_addr.is_empty() {
         return Err(WsError::Other("empty dial address".to_string()));
     }
@@ -541,7 +551,7 @@ pub async fn ws_connect_once(
     set_sock_opts(&raw_conn);
 
     let connector = TlsConnector::from(TLS_CONFIG.clone());
-    let sni = server_name(domain);
+    let sni = server_name(sni_domain);
 
     let handshake_timeout = ws_handshake_timeout(timeout);
     let tls_conn =
@@ -680,6 +690,16 @@ pub async fn ws_connect(
     path: &str,
     timeout: f64,
 ) -> Result<RawWebSocket, WsError> {
+    ws_connect_with_sni(ip, domain, path, timeout, domain).await
+}
+
+pub async fn ws_connect_with_sni(
+    ip: &str,
+    domain: &str,
+    path: &str,
+    timeout: f64,
+    sni_domain: &str,
+) -> Result<RawWebSocket, WsError> {
     let path = if path.is_empty() { "/apiws" } else { path };
     let attempt_timeout = ws_connect_timeout(timeout);
 
@@ -689,13 +709,13 @@ pub async fn ws_connect(
         ip.trim().to_string()
     };
 
-    match ws_connect_once(&primary_addr, domain, path, attempt_timeout).await {
+    match ws_connect_once_with_sni(&primary_addr, domain, path, attempt_timeout, sni_domain).await {
         Ok(ws) => return Ok(ws),
         Err(e) => {
             if primary_addr == domain && primary_addr.parse::<IpAddr>().is_err() {
                 if let Some(resolved) = crate::cfproxy::resolve_doh(domain).await {
                     if !resolved.is_empty() && resolved != primary_addr {
-                        return ws_connect_once(&resolved, domain, path, attempt_timeout).await;
+                        return ws_connect_once_with_sni(&resolved, domain, path, attempt_timeout, sni_domain).await;
                     }
                 }
             }
