@@ -1238,7 +1238,9 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
 
     // Mirror current Flowseal behavior: a timed-out direct IP is avoided for a
     // long cooldown, but an already established WS from the pool is still usable.
-    if now < ip_fail_until && CFPROXY_ENABLED.load(Ordering::Relaxed) {
+    let has_network_fallback =
+        CFPROXY_ENABLED.load(Ordering::Relaxed) || !CFWORKER_DOMAINS.read().is_empty();
+    if now < ip_fail_until && has_network_fallback {
         prepooled_ws = pool
             .get(dc, is_media, target.clone(), domains.clone())
             .await;
